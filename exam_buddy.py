@@ -1,0 +1,313 @@
+"""
+Exam Buddy Module
+Provides specialized study coaching for Indian competitive exams (JEE, NEET, etc.)
+"""
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate, HumanMessagePromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from api_key_rotator import get_api_key
+import logging
+import re
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger("zenark.exam_buddy")
+
+# System prompt for exam buddy with guardrails
+EXAM_BUDDY_SYSTEM_PROMPT = """You are a friendly and knowledgeable study coach specialized in helping Indian teenage students prepare for competitive exams like JEE Main, NEET, IIT, NIT, etc.
+
+Your expertise includes:
+- Effective study techniques and time management
+- Memory enhancement tricks for formulas, equations, and periodic tables
+- Subject-specific strategies for Chemistry, Mathematics, Physics, and Biology
+- Exam preparation psychology and stress management
+- Indian education system specific advice
+
+Always be:
+- Encouraging and supportive
+- Practical with actionable advice
+- Culturally aware of Indian student challenges
+- Focused on proven study methods
+
+Current user context: {context}
+
+Important: Tailor your advice to competitive exam preparation and provide specific, implementable tips."""
+
+# In-memory session storage (for production, use MongoDB)
+_session_store = {}
+
+
+def get_session_history(session_id: str) -> ChatMessageHistory:
+    """
+    Retrieve or create chat history for a session.
+    
+    Args:
+        session_id: Unique session identifier
+        
+    Returns:
+        ChatMessageHistory object for the session
+    """
+    if session_id not in _session_store:
+        _session_store[session_id] = ChatMessageHistory()
+    return _session_store[session_id]
+
+
+def filter_user_input(text: str) -> str:
+    """
+    Filter and clean user input before sending to LLM.
+    Removes any potentially harmful or off-topic content.
+    """
+    # Remove any URLs
+    text = re.sub(r'http\S+|www.\S+', '', text)
+    
+    # Remove any special characters or code blocks that might be used for injection
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    text = re.sub(r'`.*?`', '', text)
+    
+    # Truncate very long inputs to prevent abuse
+    max_length = 1000
+    if len(text) > max_length:
+        text = text[:max_length] + "... [truncated]"
+    
+    return text.strip()
+
+def should_respond_to_input(text: str) -> bool:
+    """
+    Check if the input is appropriate for the exam buddy to respond to.
+    Returns True if the input is appropriate, False otherwise.
+    """
+    # List of inappropriate topics
+    inappropriate_keywords = [
+        'personal information', 'password', 'credit card', 'ssn', 'social security',
+        'illegal', 'hack', 'cheat', 'exam paper', 'leak', 'adult content',
+        'porn', 'violence', 'hate speech', 'discrimination'
+    ]
+    
+    text_lower = text.lower()
+    return not any(keyword in text_lower for keyword in inappropriate_keywords)
+
+def create_exam_buddy_chain():
+    """
+    Create the exam buddy conversational chain with memory and guardrails.
+    
+    Returns:
+        RunnableWithMessageHistory chain with guardrails
+    """
+    # Initialize LLM with API key rotation
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, openai_api_key=get_api_key())
+    
+    # Enhanced system prompt with guardrails
+    system_prompt = """You are a friendly and knowledgeable study coach specialized in helping Indian teenage students prepare for competitive exams like JEE Main, NEET, IIT, NIT, etc.
+
+Your expertise includes:
+- Effective study techniques and time management
+- Memory enhancement tricks for formulas, equations, and periodic tables
+- Subject-specific strategies for Chemistry, Mathematics, Physics, and Biology
+- Exam preparation psychology and stress management
+- Indian education system specific advice
+
+IMPORTANT RULES:
+1. You must ONLY respond to questions related to exam preparation, study techniques, and academic guidance.
+2. If asked about inappropriate topics, politely decline and guide the conversation back to exam preparation.
+3. Never provide direct answers to exam questions or engage in academic dishonesty.
+4. Always respond in the same language as the user's question, unless they specifically ask for another language.
+5. If the user switches languages, respond in the same language they used in their last message.
+6. If you're unsure about an answer, say so rather than providing incorrect information.
+
+Current user context: {context}
+
+User's preferred language: {language}"""
+    
+    # Create prompt template with history and language support
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "{question}")
+    ])
+    
+    # Create chain with output parsing
+    output_parser = StrOutputParser()
+    
+    # Add guardrail checks
+    def apply_guardrails(inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply guardrails to the input."""
+        question = inputs.get("question", "")
+        
+        # Filter the input
+        filtered_question = filter_user_input(question)
+        
+        # Check if we should respond to this input
+        if not should_respond_to_input(filtered_question):
+            return {
+                "response": "I'm sorry, but I can only assist with exam preparation and study-related questions. Is there something about your studies I can help you with?"
+            }
+            
+        # Detect language (simple check for now, could be enhanced)
+        language = "English"  # default
+        if any(char >= '\u0900' and char <= '\u097F' for char in question):
+            language = "Hindi"
+        elif any(char >= '\u0B80' and char <= '\u0BFF' for char in question):
+            language = "Tamil"
+            
+        return {
+            "question": filtered_question,
+            "language": language,
+            **{k: v for k, v in inputs.items() if k != "question"}
+        }
+    
+    try:
+        from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+        from langchain_core.runnables.config import RunnableConfig
+    except ImportError:
+        # Fallback for older versions
+        from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
+        from langchain.schema.runnable.config import RunnableConfig
+
+    # Create the processing chain using RunnableLambda for better compatibility
+    input_processor = {
+        "question": lambda x: x["question"],
+        "context": lambda x: x.get("context", ""),
+        "history": lambda x: x.get("history", []),
+    }
+    
+    # Create the processing steps
+    chain = RunnablePassthrough()
+    
+    # Add the input processing step
+    chain = chain | RunnableLambda(
+        lambda x: {
+            **{k: v(x) for k, v in input_processor.items()},
+            **{k: v for k, v in x.items() if k not in input_processor}
+        }
+    )
+    
+    # Add the guardrails step
+    chain = chain | RunnableLambda(
+        lambda x: {"processed": apply_guardrails(x)}
+    )
+    
+    # Add the LLM processing step
+    def process_with_llm(x):
+        # Process the input through the LLM
+        processed = prompt.invoke({
+            "question": x["processed"]["question"],
+            "context": x["processed"].get("context", ""),
+            "history": x["processed"].get("history", []),
+            "language": x["processed"].get("language", "English")
+        })
+        
+        # Get the LLM response
+        llm_response = llm.invoke(processed)
+        
+        # Parse the output
+        response = output_parser.invoke(llm_response)
+        
+        return {"response": response, **x}
+    
+    chain = chain | RunnableLambda(process_with_llm)
+    
+    # Final response formatting
+    chain = chain | RunnableLambda(
+        lambda x: x.get("response", "I'm not sure how to respond to that.")
+    )
+    
+    # Wrap with message history
+    conversational_chain = RunnableWithMessageHistory(
+        chain,
+        get_session_history,
+        input_messages_key="question",
+        history_messages_key="history"
+    )
+    
+    return conversational_chain
+
+
+# Global chain instance
+_exam_buddy_chain = None
+
+
+def get_exam_buddy_chain():
+    """Get or create the global exam buddy chain instance."""
+    global _exam_buddy_chain
+    if _exam_buddy_chain is None:
+        _exam_buddy_chain = create_exam_buddy_chain()
+    return _exam_buddy_chain
+
+
+async def get_exam_buddy_response(
+    question: str,
+    session_id: str = "default",
+    context: str = "",
+    **kwargs
+) -> str:
+    """
+    Get a response from the exam buddy with enhanced guardrails and language support.
+    
+    Args:
+        question: User's question about exam preparation
+        session_id: Session identifier for conversation history
+        context: Additional context about the user
+        **kwargs: Additional parameters including 'language' for response language
+        
+    Returns:
+        Exam buddy's response as a string
+    """
+    try:
+        if not question or not question.strip():
+            return "I didn't catch that. Could you please rephrase your question?"
+            
+        # Get the chain instance
+        chain = get_exam_buddy_chain()
+        
+        # Prepare the input for the chain
+        chain_input = {
+            "question": question,
+            "context": context,
+            "language": kwargs.get("language", "English")
+        }
+        
+        # Get the response with error handling
+        response = await chain.ainvoke(
+            chain_input,
+            config={"configurable": {"session_id": session_id}}
+        )
+        
+        # Log the interaction (in a real app, you'd want to log to a database)
+        logger.info(f"Response generated for session {session_id}")
+        
+        # Ensure the response is appropriate
+        if not response or not response.strip():
+            return "I'm not sure how to respond to that. Could you please rephrase your question about exam preparation?"
+            
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in get_exam_buddy_response: {str(e)}", exc_info=True)
+        return (
+            "I'm having some technical difficulties right now. "
+            "Please try asking your question again in a moment."
+        )
+
+
+def clear_session_history(session_id: str):
+    """
+    Clear the conversation history for a specific session.
+    
+    Args:
+        session_id: Session identifier to clear
+    """
+    if session_id in _session_store:
+        del _session_store[session_id]
+        logger.info(f"Cleared session history for {session_id}")
+
+
+def get_all_sessions():
+    """
+    Get list of all active session IDs.
+    
+    Returns:
+        List of session IDs
+    """
+    return list(_session_store.keys())
