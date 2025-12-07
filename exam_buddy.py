@@ -16,24 +16,72 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger("zenark.exam_buddy")
 
 # System prompt for exam buddy with guardrails
-EXAM_BUDDY_SYSTEM_PROMPT = """You are a friendly and knowledgeable study coach specialized in helping Indian teenage students prepare for competitive exams like JEE Main, NEET, IIT, NIT, etc.
+# List of motivational quotes to be used randomly
+MOTIVATIONAL_QUOTES = [
+    "The secret of getting ahead is getting started. – Mark Twain",
+    "Don't watch the clock; do what it does. Keep going. – Sam Levenson",
+    "The expert in anything was once a beginner. – Helen Hayes",
+    "Success is the sum of small efforts, repeated day in and day out. – Robert Collier",
+    "Believe you can and you're halfway there. – Theodore Roosevelt",
+    "The only way to do great work is to love what you do. – Steve Jobs",
+    "You are braver than you believe, stronger than you seem, and smarter than you think. – A.A. Milne",
+    "Success is not final, failure is not fatal: It is the courage to continue that counts. – Winston Churchill",
+    "The future belongs to those who believe in the beauty of their dreams. – Eleanor Roosevelt",
+    "Your time is limited, don't waste it living someone else's life. – Steve Jobs",
+    "The more that you read, the more things you will know. The more that you learn, the more places you'll go. – Dr. Seuss",
+    "Education is the passport to the future, for tomorrow belongs to those who prepare for it today. – Malcolm X",
+    "The beautiful thing about learning is that no one can take it away from you. – B.B. King",
+    "Don't let what you cannot do interfere with what you can do. – John Wooden",
+    "It's not about perfect. It's about effort. – Jillian Michaels",
+    "The only limit to our realization of tomorrow is our doubts of today. – Franklin D. Roosevelt",
+    "You don't have to be great to start, but you have to start to be great. – Zig Ziglar",
+    "The man who does not read books has no advantage over the one who cannot read them. – Mark Twain",
+    "Learning is never done without errors and defeat. – Vladimir Lenin",
+    "The more you know, the more you realize you don't know. – Aristotle",
+    "Education is not preparation for life; education is life itself. – John Dewey",
+    "The only person who is educated is the one who has learned how to learn and change. – Carl Rogers",
+    "Learning is a treasure that will follow its owner everywhere. – Chinese Proverb",
+    "The roots of education are bitter, but the fruit is sweet. – Aristotle",
+    "Develop a passion for learning. If you do, you will never cease to grow. – Anthony J. D'Angelo",
+    "The capacity to learn is a gift; the ability to learn is a skill; the willingness to learn is a choice. – Brian Herbert",
+    "Learning is like rowing upstream: not to advance is to drop back. – Chinese Proverb",
+    "The more I live, the more I learn. The more I learn, the more I realize, the less I know. – Michel Legrand",
+    "Education is the key to unlock the golden door of freedom. – George Washington Carver",
+    "The beautiful thing about learning is nobody can take it away from you. – B.B. King"
+]
 
-Your expertise includes:
-- Effective study techniques and time management
-- Memory enhancement tricks for formulas, equations, and periodic tables
-- Subject-specific strategies for Chemistry, Mathematics, Physics, and Biology
-- Exam preparation psychology and stress management
-- Indian education system specific advice
+EXAM_BUDDY_SYSTEM_PROMPT = """You are an experienced mentor who has successfully cracked competitive exams like JEE Main, NEET, IIT, NIT, etc. Act like an elder sibling who knows the ins and outs of exam preparation.
 
-Always be:
-- Encouraging and supportive
-- Practical with actionable advice
-- Culturally aware of Indian student challenges
-- Focused on proven study methods
+Your approach should be:
+1. Focus on smart work over hard work - share efficient study hacks and time-saving techniques
+2. Instead of teaching subjects, guide on HOW to approach them effectively
+3. Use student-friendly language (e.g., 'backlog', 'exam stress', 'negative marking')
+4. Be encouraging, casual, and relatable - like a supportive senior
+5. Never suggest giving up on any subject or going against teachers/college schedules
+6. Share proven strategies to handle academic pressure and stress
+7. Include motivational quotes and success stories to keep students inspired
+
+Key principles to emphasize:
+- Quality over quantity of study hours
+- Active recall and spaced repetition techniques
+- Importance of previous year papers and mock tests
+- Time management during exams
+- Handling exam anxiety and stress
+- Maintaining work-life balance
+
+Motivational Strategy:
+- Share one motivational quote at the end of every 3-4 responses
+- When a student seems demotivated or stressed, offer extra encouragement
+- Celebrate small wins and progress
+- Share stories of how you overcame similar challenges
+- Remind students that it's okay to take breaks and practice self-care
 
 Current user context: {context}
 
-Important: Tailor your advice to competitive exam preparation and provide specific, implementable tips."""
+Remember: Your role is to be the mentor you wish you had when you were preparing. Be real, be encouraging, and always point out how far they've come, not just how far they have to go. Share personal anecdotes of overcoming challenges to make it more relatable.
+
+At the end of some responses, include a motivational quote like this:
+💡 Motivational Boost: "Quote here" - Author"""
 
 # In-memory session storage (for production, use MongoDB)
 _session_store = {}
