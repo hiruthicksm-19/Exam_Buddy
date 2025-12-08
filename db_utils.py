@@ -1,17 +1,18 @@
+"""
+Database utilities for Exam Buddy.
+Handles all database operations with proper connection management.
+"""
 import os
 from datetime import datetime, timedelta
-from bson import ObjectId
-from pymongo import MongoClient, ReturnDocument
-from pymongo.server_api import ServerApi
-from pymongo.errors import DuplicateKeyError
-from bson.errors import InvalidId
-from dotenv import load_dotenv
-from typing import Dict, List, Optional, Any, Tuple
-
-load_dotenv()
+from typing import Optional, Dict, List, Any
+from pymongo import MongoClient, server_api
+from pymongo.errors import PyMongoError
 
 class MongoDBManager:
+    """MongoDB database manager for Exam Buddy."""
+    
     def __init__(self):
+        """Initialize MongoDB connection and setup collections."""
         # Try MONGODB_URI first, fall back to MONGO_URI if not found
         self.uri = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
         if not self.uri:
@@ -24,355 +25,250 @@ class MongoDBManager:
             # Connect with a 5-second timeout
             self.client = MongoClient(
                 self.uri, 
-                server_api=ServerApi('1'),
+                server_api=server_api.ServerApi('1'),
                 connectTimeoutMS=5000,
                 serverSelectionTimeoutMS=5000
             )
             
             # Test the connection
-            print("   Testing connection...")
             self.client.admin.command('ping')
-            print("   ✓ Successfully connected to MongoDB!")
+            print("✅ Successfully connected to MongoDB!")
             
-            # List all databases for debugging
-            print("\n📊 Available databases:")
-            db_names = self.client.list_database_names()
-            for db_name in db_names:
-                print(f"   - {db_name}")
-            
-            # Access the zenark_db database
-            print(f"\n📂 Using database: zenark_db")
+            # Set the database
             self.db = self.client['zenark_db']
             
-            # List all collections for debugging
-            print("\n📁 Available collections:")
-            collections = self.db.list_collection_names()
-            for collection in collections:
-                print(f"   - {collection}")
-            
-            # Access collections with explicit names
-            print("\n🔍 Accessing collections...")
-            self.students = self.db['student_marks']
+            # Initialize collections
             self.sessions = self.db['exam_buddy_session']
-            
-            # Verify collections exist
-            collections = self.db.list_collection_names()
-            if 'student_marks' not in collections:
-                print("⚠️ Warning: 'student_marks' collection not found in database")
-            if 'exam_buddy_session' not in collections:
-                print("ℹ️ 'exam_buddy_session' collection not found, it will be created when needed")
+            self.students = self.db['student_marks']
             
             # Create indexes
-            print("   ✓ Collections accessed successfully")
             self._create_indexes()
             
-            # Print sample data for debugging
-            print("\n👤 Sample student data:")
-            sample = self.students.find_one()
-            if sample:
-                print(f"   Found student: {sample}")
-                # Print all students for debugging
-                print("\n📝 All students:")
-                for student in self.students.find({}):
-                    print(f"   - {student.get('name')} (ID: {student.get('_id')})")
-            else:
-                print("   ❌ No student data found in the 'student_marks' collection")
-                print("   Make sure your collection name is 'student_marks' and contains student data")
+            # Print database info
+            #self._print_db_info()
+            
+        except Exception as e:
+            print(f"❌ Failed to connect to MongoDB: {e}")
+            raise
+
+    def _create_indexes(self):
+        """Create necessary indexes for optimal query performance."""
+        try:
+            # Drop all existing indexes first to avoid conflicts
+            self.sessions.drop_indexes()
+            
+            # TTL index for session expiration (7 days)
+            self.sessions.create_index("expires_at", expireAfterSeconds=0, name="expires_at_ttl")
+            
+            # Index for faster lookups - sparse unique index on student_id
+            self.sessions.create_index(
+                "session_id", 
+                unique=True, 
+                name="session_id_unique"
+            )
+            
+            # Sparse unique index on student_id to allow multiple nulls
+            self.sessions.create_index(
+                [("student_id", 1)], 
+                unique=True, 
+                sparse=True,
+                name="student_id_unique_sparse"
+            )
+            
+            # Index for student marks
+            self.students.create_index(
+                "student_id", 
+                unique=True, 
+                sparse=True,  # Allow multiple null values
+                name="student_marks_id_unique"
+            )
+            
+            print("✅ Database indexes created/verified")
+            
+        except Exception as e:
+            print(f"❌ Error creating indexes: {e}")
+            print("⚠️ Continuing with existing indexes...")
+
+    def _print_db_info(self):
+        """Print database information for debugging."""
+        try:
+            # List all databases
+            db_list = self.client.list_database_names()
+            print(f"\n📚 Available databases ({len(db_list)}):")
+            for db_name in sorted(db_list):
+                if db_name in ['admin', 'local', 'config']:
+                    continue
+                print(f"   - {db_name}")
+            
+            # Access the pqe_db database
+           # print(f"\n📂 Using database: zenark_db")
+            
+            # List all collections for debugging
+            # print("\n📁 Available collections:")
+            # for coll_name in self.db.list_collection_names():
+            #     print(f"   - {coll_name}")
                 
-            # Additional debug: Try to find the specific student
-            print("\n🔍 Looking for student with ID: 693423f8cf67390a52555eef")
-            try:
-                from bson import ObjectId
-                student = self.students.find_one({"_id": ObjectId("693423f8cf67390a52555eef")})
-                if student:
-                    print(f"   ✓ Found student: {student}")
-                else:
-                    print("   ❌ Student not found with the specified ID")
-                    print("   Available student IDs:")
-                    for s in self.students.find({}, {"_id": 1, "name": 1}):
-                        print(f"   - {s.get('name')}: {s.get('_id')}")
-            except Exception as e:
-                print(f"   ❌ Error searching for student: {str(e)}")
+            # Print collection counts
+            print("\n📊 Collection counts:")
+            for coll_name in self.db.list_collection_names():
+                count = self.db[coll_name].count_documents({})
+                print(f"   - {coll_name}: {count} documents")
                 
         except Exception as e:
-            print(f"\n❌ MongoDB connection error: {str(e)}")
-            print("\n🔧 Please check:")
-            print("   1. Your MongoDB URI is correct and includes the database name")
-            print("   2. Your network connection to MongoDB is working")
-            print("   3. The database and collections exist")
-            print("   4. The MongoDB server is running and accessible")
-            print("   5. Your IP is whitelisted in MongoDB Atlas (if using Atlas)")
-            raise
-    
-    def _create_indexes(self):
-        """Create necessary indexes for the database."""
-        self.sessions.create_index("session_id", unique=True)
-        self.sessions.create_index("expires_at", expireAfterSeconds=0)  # TTL index
-        self.sessions.create_index("last_activity")  # For session cleanup
-        
-    def update_session(self, session_id: str, update_data: Dict) -> bool:
-        """
-        Update session data.
-        
-        Args:
-            session_id: Session ID to update
-            update_data: Dictionary of fields to update
-            
-        Returns:
-            True if update was successful, False otherwise
-        """
+            print(f"⚠️ Could not print database info: {e}")
+
+    # Session management methods
+    def get_session(self, session_id: str) -> Optional[Dict]:
+        """Get session by ID and update last activity timestamp."""
         try:
-            # Ensure last_activity is always updated if not explicitly set
-            if "last_activity" not in update_data:
-                update_data["last_activity"] = datetime.utcnow()
-                
-            # Handle $push operations separately
-            push_operations = {k: v for k, v in update_data.items() if k.startswith('$')}
-            set_operations = {k: v for k, v in update_data.items() if not k.startswith('$')}
-            
-            update = {}
-            if set_operations:
-                update['$set'] = set_operations
-            if push_operations:
-                update.update(push_operations)
-                
-            if not update:
-                return False
-                
+            return self.sessions.find_one_and_update(
+                {"session_id": session_id},
+                {"$set": {"last_activity": datetime.utcnow()}},
+                return_document=True
+            )
+        except PyMongoError as e:
+            print(f"Error getting session: {e}")
+            return None
+
+    def create_session(self, session_data: Dict) -> Optional[str]:
+        """Create a new session and return the session ID."""
+        try:
+            result = self.sessions.insert_one(session_data)
+            return str(result.inserted_id)
+        except PyMongoError as e:
+            print(f"Error creating session: {e}")
+            return None
+
+    def update_session(self, session_id: str, update_data: Dict) -> bool:
+        """Update an existing session."""
+        try:
             result = self.sessions.update_one(
                 {"session_id": session_id},
-                update,
-                upsert=True  # Create the session if it doesn't exist
+                {"$set": update_data}
+            )
+            return result.modified_count > 0
+        except PyMongoError as e:
+            print(f"Error updating session: {e}")
+            return False
+
+    # Student management methods
+    def get_student(self, student_id: str) -> Optional[Dict]:
+        """Get student by ID."""
+        try:
+            student = self.students.find_one({"student_id": student_id})
+            if student and '_id' in student:
+                student['_id'] = str(student['_id'])
+            return student
+        except PyMongoError as e:
+            print(f"Error getting student: {e}")
+            return None
+
+    def update_student(self, student_id: str, update_data: Dict) -> bool:
+        """Update student data."""
+        try:
+            result = self.students.update_one(
+                {"student_id": student_id},
+                {"$set": update_data},
+                upsert=True
             )
             return result.modified_count > 0 or result.upserted_id is not None
-        except Exception as e:
-            print(f"Error updating session {session_id}: {str(e)}")
+        except PyMongoError as e:
+            print(f"Error updating student: {e}")
             return False
-    
-    # User Management
-    def get_user_by_id(self, user_id: str) -> Optional[Dict]:
-        """
-        Get user by ID and prepare user data for the session.
-        
-        Args:
-            user_id: User's MongoDB ObjectId as string
-            
-        Returns:
-            Dictionary with user data including name and marks, or None if not found
-        """
-        try:
-            print(f"🔍 Looking up user with ID: {user_id}")
-            user = self.students.find_one({"_id": ObjectId(user_id)})
-            
-            if not user:
-                print("❌ User not found")
-                return None
-                
-            print(f"✅ Found user: {user.get('name')} (ID: {user_id})")
-            
-            # Prepare user data for the session
-            user_data = {
-                '_id': str(user['_id']),  # Convert ObjectId to string
-                'name': user.get('name', 'Student'),
-                'marks': user.get('marks', []),
-                'previous_marks': {}
-            }
-            
-            # Create a dictionary of previous marks for easy lookup
-            for subject in user_data['marks']:
-                if 'subject' in subject and 'marks' in subject:
-                    user_data['previous_marks'][subject['subject'].lower()] = subject['marks']
-            
-            print(f"📊 Found {len(user_data['marks'])} subject marks for {user_data['name']}")
-            return user_data
-            
-        except Exception as e:
-            print(f"❌ Error in get_user_by_id: {str(e)}")
-            return None
-    
-    # Session Management
-    def create_session(self, user_id: str, session_data: Optional[Dict] = None) -> str:
-        """
-        Create a new session for a user.
-        
-        Args:
-            user_id: User's ID (MongoDB ObjectId as string)
-            session_data: Additional session data to store
-            
-        Returns:
-            Session ID
-        """
-        from uuid import uuid4
-        
-        session_id = str(uuid4())
-        expires_at = datetime.utcnow() + timedelta(days=7)  # Session expires in 7 days
-        
-        session = {
-            "session_id": session_id,
-            "user_id": user_id,
-            "created_at": datetime.utcnow(),
-            "expires_at": expires_at,
-            "last_activity": datetime.utcnow(),
-            "data": session_data or {}
-        }
-        
-        self.sessions.insert_one(session)
-        return session_id
-    
-    def get_session(self, session_id: str) -> Optional[Dict]:
-        """
-        Get session data by session ID.
-        
-        Args:
-            session_id: Session ID to look up
-            
-        Returns:
-            Session data or None if not found/expired
-        """
-        session = self.sessions.find_one_and_update(
-            {"session_id": session_id, "expires_at": {"$gt": datetime.utcnow()}},
-            {"$set": {"last_activity": datetime.utcnow()}},
-            return_document=ReturnDocument.AFTER
-        )
-        
-        if session:
-            # Convert ObjectId to string for JSON serialization
-            session['_id'] = str(session['_id'])
-            if 'user_id' in session:
-                session['user_id'] = str(session['user_id'])
-        
-        return session
-    
-    def delete_session(self, session_id: str) -> bool:
-        """
-        Delete a session.
-        
-        Args:
-            session_id: Session ID to delete
-            
-        Returns:
-            True if session was deleted, False otherwise
-        """
-        result = self.sessions.delete_one({"session_id": session_id})
-        return result.deleted_count > 0
-    
-    def get_student_marks(self, student_name: str) -> Optional[Dict[str, Any]]:
-        """Fetch student's marks by name (case-insensitive)"""
-        return self.students.find_one({"name": {"$regex": f'^{student_name}$', '$options': 'i'}})
-    
-    def save_session(self, session_id: str, messages: List[Dict]):
-        """Save or update session messages"""
-        self.sessions.update_one(
-            {"session_id": session_id},
-            {"$set": {"messages": messages}},
-            upsert=True
-        )
-    
-    def get_session(self, session_id: str) -> Optional[Dict]:
-        """Retrieve session messages"""
-        return self.sessions.find_one({"session_id": session_id})
-    
-    def close(self):
-        """Close the MongoDB connection"""
-        self.client.close()
 
-    def get_conversation_history(self, session_id: str) -> list:
-        """
-        Get conversation history for a session.
-        
-        Args:
-            session_id: The session ID
-            
-        Returns:
-            List of conversation messages
-        """
-        try:
-            session = self.sessions.find_one(
-                {"session_id": session_id},
-                {"conversation": 1}
-            )
-            return session.get('conversation', []) if session else []
-        except Exception as e:
-            print(f"Error getting conversation history: {e}")
-            return []
-
-    def add_to_conversation_history(self, session_id: str, role: str, content: str) -> None:
-        """
-        Add a message to the conversation history.
-        
-        Args:
-            session_id: The session ID
-            role: 'user' or 'assistant'
-            content: The message content
-        """
+    # Message management methods
+    def save_message(self, student_id: str, role: str, content: str) -> bool:
+        """Save a message to the conversation history."""
         try:
             message = {
-                'role': role,
-                'content': content,
-                'timestamp': datetime.utcnow()
+                "role": role,
+                "content": content,
+                "timestamp": datetime.utcnow()
             }
-            self.sessions.update_one(
-                {"session_id": session_id},
+            
+            # Update the conversation in the session
+            result = self.sessions.update_one(
+                {"student_id": student_id},
                 {
-                    "$push": {"conversation": message},
+                    "$push": {"conversation": {"$each": [message], "$slice": -80}},  # Keep last 80 messages
                     "$set": {
-                        "last_updated": datetime.utcnow(),
-                        "expires_at": datetime.utcnow() + timedelta(days=7)  # Extend session on activity
+                        "last_activity": datetime.utcnow(),
+                        "expires_at": datetime.utcnow() + timedelta(days=7)
                     }
                 },
                 upsert=True
             )
-        except Exception as e:
-            print(f"Error updating conversation history: {e}")
-
-    def clear_conversation_history(self, session_id: str) -> None:
-        """
-        Clear conversation history for a session.
-        
-        Args:
-            session_id: The session ID
-        """
-        try:
-            self.sessions.update_one(
-                {"session_id": session_id},
-                {
-                    "$set": {
-                        "conversation": [],
-                        "last_updated": datetime.utcnow()
-                    }
-                }
-            )
-        except Exception as e:
-            print(f"Error clearing conversation history: {e}")
             
-    def get_recent_messages(self, student_id: str, limit: int = 5) -> list:
+            return result.modified_count > 0 or result.upserted_id is not None
+        except PyMongoError as e:
+            print(f"Error saving message: {e}")
+            return False
+
+    def get_conversation(self, student_id: str, limit: int = 80) -> List[Dict]:
+        """Get conversation for a student."""
+        try:
+            session = self.sessions.find_one(
+                {"student_id": student_id},
+                {"conversation": {"$slice": -limit}}  # Get last N messages
+            )
+            return session.get("conversation", []) if session else []
+        except PyMongoError as e:
+            print(f"Error getting conversation: {e}")
+            return []
+
+    # Context management
+    def save_context(self, student_id: str, context: str) -> bool:
+        """Save context for a student's session."""
+        try:
+            result = self.sessions.update_one(
+                {"student_id": student_id},
+                {"$set": {"context": context}},
+                upsert=True
+            )
+            return result.modified_count > 0 or result.upserted_id is not None
+        except PyMongoError as e:
+            print(f"Error saving context: {e}")
+            return False
+
+    def get_context(self, student_id: str) -> str:
+        """Get context for a student's session."""
+        try:
+            session = self.sessions.find_one(
+                {"student_id": student_id},
+                {"context": 1}
+            )
+            return session.get("context", "") if session else ""
+        except PyMongoError as e:
+            print(f"Error getting context: {e}")
+            return ""
+
+    def get_recent_messages(self, student_id: str, limit: int = 3) -> List[Dict]:
         """
-        Get the most recent messages from conversation history.
+        Get the most recent messages for a student.
         
         Args:
             student_id: The student's ID
-            limit: Maximum number of messages to return
+            limit: Maximum number of recent messages to return (default: 3)
             
         Returns:
-            List of recent messages (most recent first)
+            List of message dictionaries with 'role' and 'content' keys
         """
         try:
-            result = self.db.student_marks.aggregate([
-                {"$match": {"_id": ObjectId(student_id)}},
-                {"$project": {
-                    "recent_messages": {
-                        "$slice": ["$conversation_history", -limit, limit]
-                    }
-                }}
-            ])
+            # Get the most recent session for the student
+            session = self.sessions.find_one(
+                {"student_id": student_id},
+                sort=[("last_activity", -1)]  # Get most recent session first
+            )
             
-            messages = list(result)
-            if messages and 'recent_messages' in messages[0]:
-                return messages[0]['recent_messages']
-            return []
-        except Exception as e:
+            if not session or "conversation" not in session:
+                return []
+                
+            # Return the most recent messages
+            return session["conversation"][-limit:]
+            
+        except PyMongoError as e:
             print(f"Error getting recent messages: {e}")
             return []
 
-# Singleton instance
+# Create a global instance
 db_manager = MongoDBManager()

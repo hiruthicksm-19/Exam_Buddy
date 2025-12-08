@@ -2,7 +2,8 @@
 import streamlit as st
 import asyncio
 import os
-from datetime import datetime, timedelta
+import traceback
+from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from exam_buddy import get_exam_buddy_response, clear_session_history, get_all_sessions
 from auth import login, get_student, logout
@@ -11,7 +12,7 @@ from typing import Dict, Any, Optional
 # Set page config
 st.set_page_config(
     page_title="Exam Buddy",
-    page_icon="📚"
+    page_icon=None
 )
 
 # Custom CSS for better UI
@@ -103,7 +104,7 @@ async def get_response_async(question, session_id, context, **kwargs):
         if question.strip().lower() in ["what was the last thing i asked you", 
                                       "what did i just ask", 
                                       "repeat my last question"]:
-            history = db_manager.get_conversation_history(session_id)
+            history = db_manager.get_conversation(session_id)
             if history:
                 # Find the last user message (excluding the current question)
                 for msg in reversed(history[:-1]):  # Exclude current message
@@ -113,7 +114,7 @@ async def get_response_async(question, session_id, context, **kwargs):
         
         # Get conversation history for context
         if session_id:
-            history = db_manager.get_conversation_history(session_id)
+            history = db_manager.get_conversation(session_id)
             if history:
                 # Format the last 3 messages for context
                 recent_messages = history[-3:]  # Get last 3 messages
@@ -141,22 +142,46 @@ async def get_response_async(question, session_id, context, **kwargs):
     return response
 
 def display_chat():
-    """Display chat messages."""
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    """Display the chat messages from the database."""
+    if 'session_id' not in st.session_state:
+        return
+        
+    try:
+        from db_utils import db_manager
+        
+        # Get the current session
+        session = db_manager.sessions.find_one({
+            "session_id": st.session_state.session_id
+        })
+        
+        if not session or 'conversation' not in session:
+            return
+            
+        # Display each message
+        for msg in session['conversation']:
+            role = "user" if msg.get('role') == 'user' else "assistant"
+            with st.chat_message(role):
+                st.write(msg.get('content', ''))
+                
+    except Exception as e:
+        print(f"Error displaying chat: {str(e)}")
+        # Fallback to session state if database fails
+        if 'messages' in st.session_state:
+            for msg in st.session_state.messages:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
 MOTIVATIONAL_QUOTES = [
-    "💡 Remember: Every challenge is an opportunity to grow. Keep pushing forward!",
-    "🌟 Progress, no matter how small, is still progress. Keep going!",
-    "🎯 Success is the sum of small efforts repeated day in and day out.",
-    "📚 The expert in anything was once a beginner. Keep learning!",
-    "🔥 Your potential is endless. Keep believing in yourself!",
-    "🚀 Small steps every day lead to big achievements. Keep it up!",
-    "💪 You're stronger than you think. Keep challenging yourself!",
-    "✨ Every expert was once a beginner. You're on the right path!",
-    "🎓 The more you practice, the luckier you get. Keep practicing!",
-    "🌈 After every storm comes a rainbow. Keep pushing through!"
+    "Remember: Every challenge is an opportunity to grow. Keep pushing forward!",
+    "Progress, no matter how small, is still progress. Keep going!",
+    "Success is the sum of small efforts repeated day in and day out.",
+    "You're capable of amazing things. Believe in yourself!",
+    "Keep going, even when it's tough. The best views come after the hardest climbs.",
+    "Turn your 'wow, but' into 'wow, but I'll try anyway!'",
+    "The expert in anything was once a beginner. Keep learning!",
+    "Small progress is still progress. Celebrate every step forward!",
+    "You don't have to be great to start, but you have to start to be great.",
+    "Your potential is endless. Keep pushing your limits!"
 ]
 
 def get_random_quote() -> str:
@@ -207,7 +232,7 @@ def collect_user_info():
 MEDICAL_EXAMS = {
     "NEET": ["NEET", "Medical", "AIPMT", "MBBS", "AIIMS", "JIPMER"],
     "AIIMS": ["AIIMS", "All India Institute of Medical Sciences"],
-    "JIPMER": ["JIPMER", "Puducherry"],
+    "JIPMER": ["JIPMER", "Jawaharlal Institute of Postgraduate Medical Education and Research"],
     "PGIMER": ["PGIMER", "Post Graduate Institute"],
     "AIIMS PG": ["AIIMS PG", "AIIMS Post Graduate"]
 }
@@ -248,6 +273,9 @@ def process_user_input(prompt: str):
     # Add user's message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
     
+    # Import db_manager here to avoid circular imports
+    from db_utils import db_manager
+    
     # Process based on what information we're collecting
     if not st.session_state.user_info["exam_type"]:
         is_valid, exam_name, exam_type = is_valid_exam(prompt)
@@ -271,39 +299,75 @@ def process_user_input(prompt: str):
         else:
             st.session_state.user_info["exam_type"] = exam_name
             st.session_state.user_info["exam_category"] = exam_type
-            response = f"Great! You're preparing for {exam_name}. What subjects are you studying? (Please list them separated by commas)"
-        
-    elif not st.session_state.user_info["subjects"]:
-        subjects = [s.strip() for s in prompt.split(",") if s.strip()]
-        if not subjects:
-            response = "Please enter at least one subject. Separate multiple subjects with commas."
-        else:
-            st.session_state.user_info["subjects"] = [s.lower() for s in subjects]  # Store in lowercase for consistency
-            response = "Is there any additional context or specific challenges you'd like to share? (e.g., 'I struggle with calculus' or 'I need help with time management')\n\nYou can also type 'skip' if you don't have any specific context to add."
-    elif not st.session_state.user_info.get("context_provided", False):
-        if prompt.lower() != 'skip':
-            st.session_state.context = prompt
-        st.session_state.user_info["context_provided"] = True
-        
-        # Get student data to check for previous marks
-        student = get_student(st.session_state.session_id)
-        if student and 'marks' in student and student['marks']:
-            st.session_state.user_info["previous_marks"] = {}
-            for mark in student['marks']:
-                if 'subject' in mark and 'marks' in mark:
-                    st.session_state.user_info["previous_marks"][mark['subject'].lower()] = mark['marks']
+            response = f"Great! You're preparing for {exam_name}. What subjects are you studying? (Please list them separated by commas, e.g., Physics, Chemistry, Biology)"
+            st.session_state.user_info["subjects"] = []  # Initialize empty subjects list
+            st.session_state.user_info["subject_marks"] = {}  # Initialize marks dictionary
+            st.session_state.user_info["awaiting_subjects"] = True
             
-            # If we have previous marks, start with the first subject
-            if st.session_state.user_info["previous_marks"]:
-                st.session_state.user_info["current_subject_index"] = 0
-                st.session_state.user_info["current_marks"] = {}  # Initialize current_marks dictionary
-                subjects = list(st.session_state.user_info["previous_marks"].keys())
-                subject = subjects[0]
-                response = f"What are your current marks in {subject}? (Enter a number between 0-100)"
-            else:
-                response = "I couldn't find your previous marks. What were your marks in the last test? (Enter a number between 0-100)"
+    elif st.session_state.user_info.get("awaiting_subjects", False):
+        subjects = [s.strip().lower() for s in prompt.split(",") if s.strip()]
+        if not subjects:
+            response = "Please enter at least one valid subject name."
         else:
-            response = "What were your marks in the last test? (Enter a number between 0-100)"
+            st.session_state.user_info["pending_subjects"] = subjects
+            st.session_state.user_info["current_subject_index"] = 0
+            st.session_state.user_info["awaiting_subjects"] = False
+            st.session_state.user_info["awaiting_marks"] = True
+            response = f"What are your marks in {subjects[0]}? (Enter a number between 0-100)"
+            
+    elif st.session_state.user_info.get("awaiting_marks", False):
+        try:
+            marks = float(prompt)
+            if 0 <= marks <= 100:
+                current_idx = st.session_state.user_info["current_subject_index"]
+                subjects = st.session_state.user_info["pending_subjects"]
+                current_subject = subjects[current_idx]
+                
+                # Store the marks for current subject
+                st.session_state.user_info["subject_marks"][current_subject] = marks
+                
+                # Move to next subject or finish
+                next_idx = current_idx + 1
+                if next_idx < len(subjects):
+                    st.session_state.user_info["current_subject_index"] = next_idx
+                    response = f"What are your marks in {subjects[next_idx]}? (Enter a number between 0-100)"
+                else:
+                    # All subjects processed
+                    subjects_list = st.session_state.user_info["pending_subjects"]
+                    st.session_state.user_info["subjects"] = subjects_list
+                    st.session_state.user_info["profile_complete"] = True
+                    st.session_state.user_info["context_provided"] = True
+                    
+                    # Get student ID from session if available
+                    student_id = st.session_state.get("student_id")
+                    
+                    # Clean up
+                    if "pending_subjects" in st.session_state.user_info:
+                        del st.session_state.user_info["pending_subjects"]
+                    if "current_subject_index" in st.session_state.user_info:
+                        del st.session_state.user_info["current_subject_index"]
+                    if "awaiting_marks" in st.session_state.user_info:
+                        del st.session_state.user_info["awaiting_marks"]
+                    
+                    # Prepare subject list for the welcome message
+                    subject_list = ", ".join([s.capitalize() for s in subjects_list])
+                    
+                    # Show welcome message
+                    response = f"""Great! I'm all set to help you with your {st.session_state.user_info['exam_type']} preparation!
+
+You can ask me about:
+- Study techniques for {subject_list}
+- Time management strategies
+- Specific topics you're struggling with
+- Practice questions
+- And much more!
+
+What would you like to start with?"""
+            else:
+                response = "Please enter a valid number between 0 and 100."
+        except ValueError:
+            response = "Please enter a valid number between 0 and 100."
+    # Handle case when we're collecting current marks for comparison
     elif "previous_marks" in st.session_state.user_info and ("current_marks" not in st.session_state.user_info or "current_subject_index" in st.session_state.user_info):
         try:
             marks = float(prompt)
@@ -311,8 +375,8 @@ def process_user_input(prompt: str):
                 if "current_marks" not in st.session_state.user_info:
                     st.session_state.user_info["current_marks"] = {}
                 
-                # Get current subject
-                subjects = list(st.session_state.user_info["previous_marks"].keys())
+                # Get current subject from previous_marks (which is now a list of subjects)
+                subjects = st.session_state.user_info["previous_marks"]
                 current_idx = st.session_state.user_info.get("current_subject_index", 0)
                 current_subject = subjects[current_idx]
                 
@@ -330,10 +394,22 @@ def process_user_input(prompt: str):
                     # Track overall performance
                     total_improvement = 0
                     improved_subjects = 0
-                    total_subjects = len(st.session_state.user_info["previous_marks"].items())
+                    total_subjects = len(subjects)
                     
-                    for subject, prev_mark in st.session_state.user_info["previous_marks"].items():
+                    # Get previous marks from database for comparison
+                    student_id = st.session_state.get("student_id")
+                    if student_id:
+                        student_data = db_manager.get_student(student_id)
+                        if student_data and 'marks' in student_data and student_data['marks']:
+                            previous_marks = {m['subject']: m['marks'] for m in student_data['marks']}
+                        else:
+                            previous_marks = {}
+                    else:
+                        previous_marks = {}
+                    
+                    for subject in subjects:
                         curr_mark = st.session_state.user_info["current_marks"].get(subject, 0)
+                        prev_mark = previous_marks.get(subject.lower(), 0)
                         mark_difference = curr_mark - prev_mark
                         if mark_difference > 0:
                             improved_subjects += 1
@@ -341,44 +417,49 @@ def process_user_input(prompt: str):
                             
                             # Encouraging messages for improvements
                             if mark_difference > 20:
-                                comparison_results.append(f"🚀 **{subject.capitalize()}**: WOW! You've improved by {mark_difference} marks! ({prev_mark} → {curr_mark}) Keep up this amazing work! 💪")
+                                comparison_results.append(f"**{subject.capitalize()}**: WOW! You've improved by {mark_difference} marks! ({prev_mark} → {curr_mark}) Keep up this amazing work!")
                             elif mark_difference > 10:
-                                comparison_results.append(f"✨ **{subject.capitalize()}**: Great job! You've improved by {mark_difference} marks! ({prev_mark} → {curr_mark}) Your hard work is paying off!")
+                                comparison_results.append(f"**{subject.capitalize()}**: Great job! You've improved by {mark_difference} marks! ({prev_mark} → {curr_mark}) Your hard work is paying off!")
                             else:
-                                comparison_results.append(f"📈 **{subject.capitalize()}**: Good progress! You've improved by {mark_difference} marks ({prev_mark} → {curr_mark}). Every step forward counts! 🌟")
+                                comparison_results.append(f"**{subject.capitalize()}**: Good progress! You've improved by {mark_difference} marks ({prev_mark} → {curr_mark}). Every step forward counts!")
                                 
                         elif mark_difference < 0:
                             decline = abs(mark_difference)
                             # Supportive messages for declines
                             if decline > 20:
-                                comparison_results.append(f"📚 **{subject.capitalize()}**: You scored {curr_mark} (down by {decline} marks). Let's identify areas to improve. You've got this! 💯")
+                                comparison_results.append(f"**{subject.capitalize()}**: You scored {curr_mark} (down by {decline} marks). Let's identify areas to improve. You've got this!")
                             elif decline > 10:
-                                comparison_results.append(f"📌 **{subject.capitalize()}**: You scored {curr_mark} (down by {decline} marks). A little more practice and you'll be back on track! 🎯")
+                                comparison_results.append(f"**{subject.capitalize()}**: You scored {curr_mark} (down by {decline} marks). A little more practice and you'll be back on track!")
                             else:
-                                comparison_results.append(f"📊 **{subject.capitalize()}**: Small dip to {curr_mark} (down by {decline} marks). You're doing great overall!")
+                                comparison_results.append(f"**{subject.capitalize()}**: Small dip to {curr_mark} (down by {decline} marks). You're doing great overall!")
                         # This handles the case where there's no previous mark (first attempt)
                         else:
-                            comparison_results.append(f"✨ **{subject.capitalize()}**: First recorded score: {curr_mark}. Great start! Let's build on this! 🌟")
+                            comparison_results.append(f"**{subject.capitalize()}**: First recorded score: {curr_mark}. Great start! Let's build on this!")
                     
-                    # Add overall performance summary
-                    if total_subjects > 0:
-                        overall_performance = (total_improvement / total_subjects) if total_subjects > 0 else 0
-                        if improved_subjects == total_subjects:
-                            comparison_results.append(f"\n🌈 **Amazing work!** You've improved in all {improved_subjects} subjects! Keep this momentum going! 🚀")
-                        elif improved_subjects > total_subjects / 2:
-                            comparison_results.append(f"\n👍 **Good progress!** You've improved in {improved_subjects} out of {total_subjects} subjects. Let's keep building on this success! 💪")
-                        else:
-                            comparison_results.append("\n📚 **Let's work on improvement areas together**. I'm here to help you strengthen your understanding and boost your scores! 🎯")
-                    
-                    # Show comparison with an encouraging header
-                    response = "📊 **Your Performance Analysis** 📊\n\n" + "\n\n".join(comparison_results) + "\n\n*" + get_random_quote() + "*"
-                    
-                    # Add comparison to chat
-                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    # Save marks to database
+                    if student_id:
+                        try:
+                            from db_utils import db_manager
+                            # Prepare marks data for saving
+                            marks_data = [
+                                {"subject": subject, "marks": float(marks)}
+                                for subject, marks in st.session_state.user_info["current_marks"].items()
+                            ]
+                            
+                            # Update student data in database
+                            db_manager.students.update_one(
+                                {"student_id": student_id},
+                                {"$set": {"marks": marks_data}},
+                                upsert=True
+                            )
+                            print(f"Saved marks to database for student {student_id}")
+                        except Exception as e:
+                            print(f"Error saving marks to database: {e}")
+                            print(traceback.format_exc())
                     
                     # Prepare welcome message
                     subject_list = ", ".join(st.session_state.user_info["subjects"])
-                    welcome_msg = f"""🎉 Great! I'm all set to help you with your {st.session_state.user_info['exam_type']} preparation!
+                    response = f"""Great! I'm all set to help you with your {st.session_state.user_info['exam_type']} preparation!
 
 You can ask me about:
 - Study techniques for {subject_list}
@@ -406,40 +487,14 @@ What would you like to start with?"""
         except ValueError:
             response = "Please enter a valid number between 0 and 100."
     # Handle case when no previous marks exist
-    elif "previous_marks" not in st.session_state.user_info:
-        try:
-            marks = float(prompt)
-            if 0 <= marks <= 100:
-                st.session_state.user_info["previous_marks"] = {"overall": marks}
-                response = "What are your current marks? (Enter a number between 0-100)"
-            else:
-                response = "Please enter a valid number between 0 and 100."
-        except ValueError:
-            response = "Please enter a valid number between 0 and 100."
-    
-    # Handle case when we're collecting current marks without previous marks
-    elif "current_marks" not in st.session_state.user_info and "previous_marks" in st.session_state.user_info and "overall" in st.session_state.user_info["previous_marks"]:
-        try:
-            marks = float(prompt)
-            if 0 <= marks <= 100:
-                prev = st.session_state.user_info["previous_marks"]["overall"]
-                
-                if marks > prev:
-                    improvement = ((marks - prev) / prev) * 100
-                    response = f"🎉 Great progress! Your score improved by {improvement:.1f}% compared to last time! Keep up the good work!"
-                elif marks < prev:
-                    decline = ((prev - marks) / prev) * 100
-                    response = f"📉 Your score decreased by {decline:.1f}% compared to last time. Let's work on improving this! What areas do you think you need to focus on?"
-                else:
-                    response = "📊 Your score is the same as last time. Let's work on improving it! Would you like some study tips?"
-                
-                # Clean up and mark as complete
-                del st.session_state.user_info["previous_marks"]
-                st.session_state.user_info["profile_complete"] = True
-                
-                # Add welcome message
-                subject_list = ", ".join(st.session_state.user_info["subjects"])
-                welcome_msg = f"""🎉 Great! I'm all set to help you with your {st.session_state.user_info['exam_type']} preparation!
+    elif "previous_marks" not in st.session_state.user_info and not st.session_state.user_info.get("profile_complete", False):
+        # Just mark the profile as complete and proceed
+        st.session_state.user_info["profile_complete"] = True
+        st.session_state.user_info["context_provided"] = True
+        
+        # Show welcome message
+        subject_list = ", ".join(st.session_state.user_info.get("subjects", ["your subjects"]))
+        response = f"""Great! I'm all set to help you with your {st.session_state.user_info['exam_type']} preparation!
 
 You can ask me about:
 - Study techniques for {subject_list}
@@ -449,13 +504,6 @@ You can ask me about:
 - And much more!
 
 What would you like to start with?"""
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                st.session_state.messages.append({"role": "assistant", "content": welcome_msg})
-                return False
-            else:
-                response = "Please enter a valid number between 0 and 100."
-        except ValueError:
-            response = "Please enter a valid number between 0 and 100."
     
     # Add assistant's response to chat history
     if 'response' in locals():
@@ -466,12 +514,14 @@ What would you like to start with?"""
 
 def show_login():
     """Show login form and handle authentication."""
-    st.title("🔐 Login to Exam Buddy")
+    st.title("Login to Exam Buddy")
     with st.form("login_form"):
         student_id = st.text_input("Enter your Student ID")
         if st.form_submit_button("Login"):
             if student_id.strip():
-                session = login(student_id)
+                # Pass the current session_id to the login function for session merging
+                current_session_id = st.session_state.get('session_id')
+                session = login(student_id, current_session_id=current_session_id)
                 if session:
                     st.session_state.session_id = str(session['_id'])
                     st.session_state.student_id = student_id
@@ -509,20 +559,13 @@ def show_sidebar():
     """Show sidebar with user controls."""
     with st.sidebar:
         st.session_state.language = st.selectbox(
-            "🌐 Language",
+            "Language",
             ["English", "हिंदी (Hindi)", "தமிழ் (Tamil)", "తెలుగు (Telugu)", "ಕನ್ನಡ (Kannada)", "മലയാളം (Malayalam)"],
             index=0
         )
         
-        if st.button("🚪 Logout", use_container_width=True):
-            if st.session_state.session_id:
-                logout(st.session_state.session_id)
-            st.session_state.clear()
-            initialize_session_state()
-            st.rerun()
-            
         st.markdown("---")
-        st.markdown("### Recent Messages")
+        
         
         # Show last 3 messages from conversation history
         if st.session_state.get('student_id'):
@@ -531,7 +574,7 @@ def show_sidebar():
             
             if recent_messages:
                 for msg in reversed(recent_messages):  # Show most recent first
-                    role = "👤" if msg['role'] == 'user' else "🤖"
+                    role = "" if msg['role'] == 'user' else ""
                     st.markdown(f"{role} *{msg['content'][:50]}...*")
                     st.markdown("---")
         
@@ -554,51 +597,116 @@ def get_student_data() -> dict:
     return get_student(st.session_state.session_id) or {}
 
 def save_message(role: str, content: str):
-    """
-    Save a message to the conversation history in the database.
-    
-    Args:
-        role: 'user' or 'assistant'
-        content: The message content
-    """
-    if not st.session_state.get('session_id'):
-        print("No session_id found in session state")
-        return
+    """Save a message to the conversation history in the database."""
+    if 'session_id' not in st.session_state or not st.session_state.session_id:
+        return False
         
     try:
-        from auth import ensure_session_exists
         from db_utils import db_manager
+        from bson import ObjectId
         
-        # Ensure session exists
-        if not ensure_session_exists(
-            st.session_state.session_id,
-            st.session_state.get('student_id')
-        ):
-            print(f"Failed to ensure session exists: {st.session_state.session_id}")
-            return
+        # Create message object
+        message = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now(timezone.utc)
+        }
+        
+        # Get the current session
+        session = db_manager.sessions.find_one({
+            "$or": [
+                {"session_id": st.session_state.session_id},
+                {"student_id": ObjectId(st.session_state.student_id) if st.session_state.get('student_id') else None}
+            ]
+        })
+        
+        if session:
+            # Get current messages
+            current_messages = session.get('conversation', [])
             
-        # Save the message with retry logic
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                db_manager.add_to_conversation_history(
-                    session_id=st.session_state.session_id,
-                    role=role,
-                    content=content
-                )
-                print(f"Message saved to session {st.session_state.session_id}")
-                break
-            except Exception as e:
-                if "duplicate key" in str(e) and attempt < max_retries - 1:
-                    import time
-                    time.sleep(0.1)
-                    continue
-                raise
-                
+            # Add new message
+            current_messages.append(message)
+            
+            # Trim messages if needed (keep last 80 messages)
+            if len(current_messages) > 80:
+                current_messages = current_messages[-80:]
+            
+            # Update the session
+            db_manager.sessions.update_one(
+                {"_id": session["_id"]},
+                {
+                    "$set": {
+                        "conversation": current_messages,
+                        "last_activity": datetime.now(timezone.utc),
+                        "expires_at": datetime.now(timezone.utc) + timedelta(days=7)
+                    }
+                }
+            )
+        else:
+            # Create new session with the first message
+            session_data = {
+                "session_id": st.session_state.session_id,
+                "student_id": ObjectId(st.session_state.student_id) if st.session_state.get('student_id') else None,
+                "created_at": datetime.now(timezone.utc),
+                "last_activity": datetime.now(timezone.utc),
+                "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
+                "conversation": [message]
+            }
+            db_manager.sessions.insert_one(session_data)
+            
+        return True
+        
     except Exception as e:
+        print(f"Error saving message: {str(e)}")
         import traceback
-        error_msg = f"Error saving message: {str(e)}\n{traceback.format_exc()}"
-        print(error_msg)
+        traceback.print_exc()
+        return False
+
+def handle_logout():
+    """Handle user logout, summarize conversation, and store context."""
+    if 'session_id' in st.session_state and 'student_id' in st.session_state:
+        try:
+            from db_utils import db_manager
+            from exam_buddy import get_llm_summary
+            
+            # Get the conversation history
+            session = db_manager.sessions.find_one({
+                "$or": [
+                    {"session_id": st.session_state.session_id},
+                    {"student_id": ObjectId(st.session_state.student_id)}
+                ]
+            })
+            
+            if session and 'conversation' in session and len(session['conversation']) > 0:
+                # Generate summary of the conversation
+                summary = get_llm_summary(session['conversation'])
+                
+                # Store the summary as context for future sessions
+                db_manager.sessions.update_one(
+                    {"student_id": ObjectId(st.session_state.student_id)},
+                    {
+                        "$set": {
+                            "context": summary,
+                            "last_activity": datetime.now(timezone.utc)
+                        }
+                    },
+                    upsert=True
+                )
+            
+            # Update last activity
+            db_manager.sessions.update_one(
+                {"session_id": st.session_state.session_id},
+                {"$set": {"last_activity": datetime.now(timezone.utc)}}
+            )
+            
+        except Exception as e:
+            print(f"Error during logout: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
+    # Clear session state and rerun
+    st.session_state.clear()
+    st.rerun()
 
 def main():
     """Main function to run the Streamlit app."""
@@ -606,22 +714,33 @@ def main():
     initialize_session_state()
     
     # Show login if not authenticated
-    if not st.session_state.is_authenticated:
+    if not st.session_state.get('is_authenticated'):
         show_login()
         return
     
-    # Import db_manager here to avoid circular imports
-    from db_utils import db_manager
+    # Add logout button to sidebar
+    with st.sidebar:
+        st.write(f"Welcome, {st.session_state.get('user_info', {}).get('name', 'Student')}!")
+        if st.button("Logout", type="primary"):
+            handle_logout()
+            return
     
     # Load conversation history if not already loaded
-    if not st.session_state.get('conversation_loaded') and st.session_state.get('session_id'):
+    if not st.session_state.get('conversation_loaded') and st.session_state.session_id:
         try:
-            history = db_manager.get_conversation_history(st.session_state.session_id)
+            from db_utils import db_manager
+            history = db_manager.get_conversation(st.session_state.session_id)
             if history:
                 st.session_state.messages = history
+            else:
+                print(f"No conversation history found for session {st.session_state.session_id}")
+                st.session_state.messages = []
+            
             st.session_state.conversation_loaded = True
         except Exception as e:
-            st.error(f"Error loading conversation history: {e}")
+            error_msg = f"Error loading conversation history: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
+            st.error("Error loading conversation history. Please refresh the page.")
     
     # Main app interface
     show_sidebar()
@@ -635,11 +754,11 @@ def main():
         
         welcome_message = f"""
         <div style='background-color:#e8f5e9; padding:20px; border-radius:10px; margin-bottom:20px;'>
-            <h2 style='color:#1b5e20;'>🌟 Welcome to Exam Buddy, {student_name}! 🌟</h2>
-            <p style='color:#1b5e20;'>Hello there! 👋</p>
+            <h2 style='color:#1b5e20;'>Welcome to Exam Buddy, {student_name}!</h2>
+            <p style='color:#1b5e20;'>Hello there!</p>
             <p style='color:#1b5e20;'>I'm your personal Exam Buddy, here to help you ace your exams with confidence! Whether you need help with tough concepts, 
-            want to practice problems, or just need some motivation, I've got your back! 🚀</p>
-            <p style='color:#1b5e20;'>Let's get started on your journey to success, {student_name}! 💪</p>
+            want to practice problems, or just need some motivation, I've got your back!</p>
+            <p style='color:#1b5e20;'>Let's get started on your journey to success, {student_name}!</p>
         </div>
         """
         st.markdown(welcome_message, unsafe_allow_html=True)
@@ -657,8 +776,8 @@ def main():
             prompt_text = "Which exam are you preparing for? (e.g., JEE Mains, NEET etc.)"
             should_show = not any(msg["content"] == prompt_text for msg in st.session_state.messages)
         elif not st.session_state.user_info["subjects"]:
-            prompt_text = f"Great! You're preparing for {st.session_state.user_info['exam_type']}. What subjects are you studying? (Please list them separated by commas)"
-            should_show = not any(msg["content"] == prompt_text for msg in st.session_state.messages)
+            # This is handled in process_user_input
+            should_show = False
         elif not st.session_state.user_info.get("context_provided", False):
             prompt_text = "Is there any additional context or specific challenges you'd like to share? (e.g., 'I struggle with calculus' or 'I need help with time management')\n\nYou can also type 'skip' if you don't have any specific context to add."
             should_show = not any(msg["content"] == prompt_text for msg in st.session_state.messages)

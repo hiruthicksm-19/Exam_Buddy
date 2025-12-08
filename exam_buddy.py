@@ -11,7 +11,8 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from api_key_rotator import get_api_key
 import logging
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from datetime import datetime
 
 logger = logging.getLogger("zenark.exam_buddy")
 
@@ -50,16 +51,19 @@ MOTIVATIONAL_QUOTES = [
     "The beautiful thing about learning is nobody can take it away from you. – B.B. King"
 ]
 
-EXAM_BUDDY_SYSTEM_PROMPT = """You are an experienced mentor who has successfully cracked competitive exams like JEE Main, NEET, IIT, NIT, etc. Act like an elder sibling who knows the ins and outs of exam preparation.
+EXAM_BUDDY_SYSTEM_PROMPT = """You are an experienced mentor who has successfully cracked competitive exams like JEE Main, NEET, IIT, NIT, etc. Act like a senior who cracked the exam before and who knows the ins and outs of exam preparation.
 
 Your approach should be:
-1. Focus on smart work over hard work - share efficient study hacks and time-saving techniques
-2. Instead of teaching subjects, guide on HOW to approach them effectively
-3. Use student-friendly language (e.g., 'backlog', 'exam stress', 'negative marking')
-4. Be encouraging, casual, and relatable - like a supportive senior
-5. Never suggest giving up on any subject or going against teachers/college schedules
-6. Share proven strategies to handle academic pressure and stress
-7. Include motivational quotes and success stories to keep students inspired
+1. Keep responses concise (max 5 lines) unless specifically asked for detailed explanations or schedules
+2. Only exceed the 5-line limit when providing study schedules, detailed problem solutions, or when explicitly requested
+3. Focus on smart work over hard work - share efficient study hacks and time-saving techniques
+4. Instead of explaining topics, guide on HOW to approach them effectively
+5. Never explain topics in detail - focus on strategies, not content
+6. Provide step-by-step approaches rather than explanations
+7. Use student-friendly language (e.g., 'backlog', 'exam stress', 'negative marking')
+8. Be encouraging, casual, and relatable - like a supportive senior
+9. Never suggest giving up on any subject or going against teachers/college schedules
+10. Share proven strategies to handle academic pressure and stress
 
 Key principles to emphasize:
 - Quality over quantity of study hours
@@ -69,22 +73,83 @@ Key principles to emphasize:
 - Handling exam anxiety and stress
 - Maintaining work-life balance
 
-Motivational Strategy:
-- Share one motivational quote at the end of every 3-4 responses
-- When a student seems demotivated or stressed, offer extra encouragement
-- Celebrate small wins and progress
-- Share stories of how you overcame similar challenges
-- Remind students that it's okay to take breaks and practice self-care
+Response Guidelines:
+- Default response length: 3-5 lines
+- Can exceed limit for: study schedules, detailed solutions, or when specifically asked
+- Never explain topics in detail - focus on how to study/approach them
+- Provide actionable steps, not theoretical explanations
+- Use bullet points for better readability
+- Keep explanations clear and to the point
 
 Current user context: {context}
 
-Remember: Your role is to be the mentor you wish you had when you were preparing. Be real, be encouraging, and always point out how far they've come, not just how far they have to go. Share personal anecdotes of overcoming challenges to make it more relatable.
+Remember: Your role is to be the mentor you wish you had when you were preparing. Be real, be encouraging, and always point out how far they've come, not just how far they have to go.
 
 At the end of some responses, include a motivational quote like this:
-💡 Motivational Boost: "Quote here" - Author"""
+ Motivational Boost: "Quote here" - Author"""
 
 # In-memory session storage (for production, use MongoDB)
 _session_store = {}
+
+def get_conversation_summary(conversation: List[Dict[str, Any]]) -> str:
+    """Generate a summary of the conversation history."""
+    try:
+        if not conversation:
+            return ""
+            
+        # Format conversation for summarization
+        formatted = []
+        for msg in conversation:
+            role = "Student" if msg.get('role') == 'user' else "Tutor"
+            content = msg.get('content', '')
+            if content:  # Only add non-empty messages
+                formatted.append(f"{role}: {content}")
+        
+        if not formatted:
+            return ""
+            
+        # Create a prompt for summarization
+        prompt = f"""
+        Please summarize the following conversation between a student and their tutor.
+        Focus on key topics discussed, study areas, and any important decisions made.
+        Keep the summary concise but informative (2-3 paragraphs max).
+        
+        Conversation:
+        {"\n".join(formatted)}
+        
+        Summary:
+        """
+        
+        # Use a basic summarization approach
+        try:
+            # Try to use the LLM for summarization if available
+            if 'get_llm_summary' in globals():
+                return get_llm_summary(conversation)
+                
+            # Fallback to a simple summary
+            topics = set()
+            for msg in conversation:
+                content = msg.get('content', '').lower()
+                if 'math' in content or 'calculus' in content or 'algebra' in content:
+                    topics.add('Mathematics')
+                if 'physics' in content:
+                    topics.add('Physics')
+                if 'chemistry' in content:
+                    topics.add('Chemistry')
+                if 'biology' in content:
+                    topics.add('Biology')
+                
+            if topics:
+                return f"Previous discussions covered: {', '.join(topics)}"
+            return "Previous conversation history is available."
+                
+        except Exception as e:
+            print(f"Error in LLM summarization: {e}")
+            return "Previous conversation history is available."
+            
+    except Exception as e:
+        print(f"Error in conversation summarization: {e}")
+        return ""
 
 
 def get_session_history(session_id: str) -> ChatMessageHistory:
@@ -272,6 +337,51 @@ User's preferred language: {language}"""
     return conversational_chain
 
 
+def get_llm_summary(conversation_history: list) -> str:
+    """
+    Generate a summary of the conversation history using the LLM.
+    
+    Args:
+        conversation_history: List of conversation messages with 'role' and 'content' keys
+        
+    Returns:
+        str: Generated summary
+    """
+    try:
+        if not conversation_history:
+            return "No previous conversation history."
+            
+        # Prepare the conversation text for summarization
+        conversation_text = "\n".join(
+            f"{msg.get('role', 'user').capitalize()}: {msg.get('content', '')}"
+            for msg in conversation_history
+        )
+        
+        # Create a prompt for summarization
+        prompt = f"""Please summarize the following conversation history for context in future interactions.
+Focus on key points, decisions, and important information. Keep it concise (3-5 sentences).
+
+Conversation History:
+{conversation_text}
+
+Summary:"""
+        
+        # Get the summary from the LLM
+        llm = ChatOpenAI(
+            temperature=0.3,
+            model_name="gpt-3.5-turbo",
+            openai_api_key=get_api_key()
+        )
+        
+        summary = llm.invoke(prompt)
+        return summary.content.strip()
+        
+    except Exception as e:
+        print(f"Error generating summary: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return "Previous conversation history is available but could not be summarized."
+
 # Global chain instance
 _exam_buddy_chain = None
 
@@ -289,7 +399,7 @@ async def get_exam_buddy_response(
     session_id: str = "default",
     context: str = "",
     **kwargs
-) -> str:
+):
     """
     Get a response from the exam buddy with enhanced guardrails and language support.
     
@@ -303,36 +413,45 @@ async def get_exam_buddy_response(
         Exam buddy's response as a string
     """
     try:
-        if not question or not question.strip():
-            return "I didn't catch that. Could you please rephrase your question?"
-            
-        # Get the chain instance
+        # Get the exam buddy chain
         chain = get_exam_buddy_chain()
         
-        # Prepare the input for the chain
-        chain_input = {
+        # Get the session history
+        history = get_session_history(session_id)
+        
+        # Get the current session to include context
+        from auth import get_session
+        session = get_session(session_id)
+        session_context = session.get('context', '') if session else ''
+        
+        # Combine with any additional context
+        full_context = f"{session_context}\n\n{context}".strip()
+        
+        # Prepare the input
+        input_data = {
             "question": question,
-            "context": context,
-            "language": kwargs.get("language", "English")
+            "context": full_context
         }
         
-        # Get the response with error handling
-        response = await chain.ainvoke(
-            chain_input,
+        # Get the response
+        response = chain.invoke(
+            input_data,
             config={"configurable": {"session_id": session_id}}
         )
         
-        # Log the interaction (in a real app, you'd want to log to a database)
-        logger.info(f"Response generated for session {session_id}")
+        # Update the session with the latest context
+        if session:
+            from db_utils import db_manager
+            db_manager.sessions.update_one(
+                {"session_id": session_id},
+                {"$set": {"last_activity": datetime.utcnow()}}
+            )
         
-        # Ensure the response is appropriate
-        if not response or not response.strip():
-            return "I'm not sure how to respond to that. Could you please rephrase your question about exam preparation?"
-            
         return response
         
     except Exception as e:
-        logger.error(f"Error in get_exam_buddy_response: {str(e)}", exc_info=True)
+        logger.error(f"Error in get_exam_buddy_response: {str(e)}")
+        return "I'm sorry, I encountered an error while processing your request. Please try again later."
         return (
             "I'm having some technical difficulties right now. "
             "Please try asking your question again in a moment."

@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, Tuple
 from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
-
+from exam_buddy import get_llm_summary
 
 # MongoDB connection
 MONGODB_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
@@ -20,18 +20,53 @@ students = db['student_marks']
 sessions = db['exam_buddy_session']
 
 # Drop any existing problematic indexes
-sessions.drop_indexes()
+try:
+    sessions.drop_indexes()
+except:
+    pass
 
-# Create TTL index for session expiration (7 days) and ensure no duplicate session_id
+# Create TTL index for session expiration (7 days)
 sessions.create_index("expires_at", expireAfterSeconds=0)
-sessions.create_index("student_id", unique=True)
+# Create sparse unique index on student_id to allow multiple nulls
+sessions.create_index("student_id", unique=True, sparse=True)
 
-def login(student_id: str) -> Optional[Dict]:
+def summarize_previous_conversations(student_id: str) -> str:
     """
-    Login a student using their ObjectId.
+    Fetch and summarize previous conversations for a student.
+    """
+    try:
+        # Get all previous sessions for this student
+        previous_sessions = sessions.find({
+            "student_id": ObjectId(student_id),
+            "conversation": {"$exists": True, "$ne": []}
+        }).sort("last_activity", -1).limit(5)  # Get last 5 sessions
+        
+        if not previous_sessions:
+            return ""
+            
+        # Extract conversations
+        all_conversations = []
+        for session in previous_sessions:
+            all_conversations.extend(session.get('conversation', []))
+            
+        if not all_conversations:
+            return ""
+            
+        # Get summary using the LLM
+        summary = get_llm_summary(all_conversations)
+        return summary or ""
+        
+    except Exception as e:
+        print(f"Error summarizing conversations: {str(e)}")
+        return ""
+
+def login(student_id: str, current_session_id: str = None) -> Optional[Dict]:
+    """
+    Login a student and maintain conversation history with context from previous sessions.
     
     Args:
         student_id: Student's MongoDB ObjectId as string
+        current_session_id: Current session ID (if any)
         
     Returns:
         Session data if login successful, None otherwise
@@ -48,44 +83,63 @@ def login(student_id: str) -> Optional[Dict]:
             print(f"Student not found with ID: {student_id}")
             return None
             
-        # Create new session
+        # Check for existing session first
+        existing_session = sessions.find_one(
+            {"student_id": ObjectId(student_id)},
+            sort=[("last_activity", -1)]  # Get the most recent session
+        )
+        
         now = datetime.utcnow()
-        expires_at = now + timedelta(days=7)  # Session expires in 7 days
         
-        # Delete any existing sessions for this user
-        sessions.delete_many({"student_id": student_id})
-        
-        # Create new session data
-        session_data = {
-            'session_id': str(ObjectId()),
-            'student_id': student_id,
-            'created_at': now,
-            'last_activity': now,
-            'expires_at': expires_at,
-            'conversation': []  # Initialize empty conversation history
-        }
-        
-        # Insert the new session
-        result = sessions.insert_one(session_data)
-        
-        if not result.inserted_id:
-            print("Failed to create session")
-            return None
+        if existing_session:
+            # Update existing session
+            session_data = {
+                "session_id": current_session_id or existing_session.get("session_id", str(ObjectId())),
+                "last_activity": now,
+                "expires_at": now + timedelta(days=7)
+            }
             
-        # Get the complete session document with the new _id
-        session = sessions.find_one({"_id": result.inserted_id})
-        if not session:
-            raise Exception("Failed to create session")
+            # Update the existing session
+            sessions.update_one(
+                {"_id": existing_session["_id"]},
+                {"$set": session_data}
+            )
             
-        # Convert ObjectId to string for JSON serialization
-        session['_id'] = str(session['_id'])
-        session['student_id'] = str(session['student_id'])
+            # Return the updated session data
+            session_data.update({
+                "_id": str(existing_session["_id"]),
+                "student_id": student_id,
+                "created_at": existing_session.get("created_at", now),
+                "conversation": existing_session.get("conversation", []),
+                "context": existing_session.get("context", "")
+            })
             
-        return session
-        
-        return session_doc
+            return session_data
+        else:
+            # Create new session with context
+            session_data = {
+                "session_id": current_session_id or str(ObjectId()),
+                "student_id": ObjectId(student_id),
+                "created_at": now,
+                "last_activity": now,
+                "expires_at": now + timedelta(days=7),
+                "conversation": [],
+                "context": ""
+            }
+            
+            # Insert the new session
+            result = sessions.insert_one(session_data)
+            
+            # Convert ObjectId to string for JSON serialization
+            session_data['_id'] = str(result.inserted_id)
+            session_data['student_id'] = student_id
+            
+            return session_data
+            
     except Exception as e:
         print(f"Login error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_session(session_id: str) -> Optional[Dict]:
@@ -211,20 +265,43 @@ def ensure_session_exists(session_id: str, student_id: Optional[str] = None) -> 
 
 def logout(session_id: str) -> bool:
     """
-    Logout by deleting the session.
+    Logout by updating the last_activity timestamp.
+    The session and student_id are preserved for future reference.
     
     Args:
-        session_id: Session ID to delete
+        session_id: Current session ID
         
     Returns:
-        bool: True if session was deleted, False otherwise
+        bool: True if logout was successful, False otherwise
     """
     try:
-        result = sessions.delete_one({"$or": [
-            {"session_id": session_id},
-            {"_id": ObjectId(session_id) if ObjectId.is_valid(session_id) else None}
-        ]})
-        return result.deleted_count > 0
+        if not session_id:
+            return False
+            
+        # Just update the last_activity timestamp
+        result = sessions.update_one(
+            {
+                "$or": [
+                    {"session_id": session_id},
+                    {"_id": ObjectId(session_id) if ObjectId.is_valid(session_id) else None}
+                ]
+            },
+            {
+                "$set": {
+                    "last_activity": datetime.utcnow()
+                }
+            }
+        )
+        
+        if result.modified_count > 0:
+            print(f"Successfully logged out from session {session_id}")
+            return True
+        else:
+            print(f"No active session found for session_id: {session_id}")
+            return False
+            
     except Exception as e:
         print(f"Error during logout: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False
